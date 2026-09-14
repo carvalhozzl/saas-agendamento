@@ -11,6 +11,11 @@ import {
 import { prisma } from "@/lib/db/prisma";
 import { formatCurrencyCents } from "@/lib/utils";
 
+// Reads plan pricing from the database on every request instead of at
+// build time — the production build must succeed even when no database
+// is reachable yet (e.g. before DATABASE_URL is configured on the host).
+export const dynamic = "force-dynamic";
+
 const BENEFITS = [
   {
     icon: CalendarCheck2,
