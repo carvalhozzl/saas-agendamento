@@ -1,0 +1,399 @@
+// AgendaPro — Database schema
+// Multi-tenant scheduling SaaS. Every business-owned row carries organizationId
+// and all reads/writes must be scoped to it at the query layer (see src/lib/db).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Platform / Identity ──────────────────────────────────────────────
+
+enum PlatformRole {
+  SUPER_ADMIN
+  USER
+}
+
+model User {
+  id           String       @id @default(uuid())
+  name         String
+  email        String       @unique
+  passwordHash String
+  platformRole PlatformRole @default(USER)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  memberships  Membership[]
+  professional Professional?
+  auditLogs    AuditLog[]
+
+  @@index([email])
+}
+
+enum OrgRole {
+  OWNER
+  MANAGER
+  PROFESSIONAL
+}
+
+// Links a User to an Organization with a role. A user can belong to more
+// than one organization (e.g. a professional who works at two studios).
+model Membership {
+  id             String   @id @default(uuid())
+  userId         String
+  organizationId String
+  role           OrgRole
+  createdAt      DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+// ─── Tenant ────────────────────────────────────────────────────────────
+
+enum OrganizationStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum BusinessSegment {
+  BARBERSHOP
+  HAIR_SALON
+  AESTHETIC_CLINIC
+  NAIL_DESIGNER
+  LASH_DESIGNER
+  TATTOO_STUDIO
+  MASSAGE_THERAPIST
+  PERSONAL_TRAINER
+  CLINIC
+  OTHER
+}
+
+model Organization {
+  id             String             @id @default(uuid())
+  name           String
+  slug           String             @unique
+  segment        BusinessSegment    @default(OTHER)
+  logoUrl        String?
+  description    String?
+  phone          String?
+  whatsapp       String?
+  address        String?
+  status         OrganizationStatus @default(TRIAL)
+  onboardingStep Int                @default(0)
+  onboardingDone Boolean            @default(false)
+  timezone       String             @default("America/Sao_Paulo")
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  memberships    Membership[]
+  professionals  Professional[]
+  clients        Client[]
+  services       Service[]
+  appointments   Appointment[]
+  workingHours   WorkingHour[]
+  blockedPeriods BlockedPeriod[]
+  notifications  Notification[]
+  subscription   Subscription?
+  auditLogs      AuditLog[]
+
+  @@index([slug])
+  @@index([status])
+}
+
+// ─── Catalog ───────────────────────────────────────────────────────────
+
+enum EntityStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Service {
+  id             String       @id @default(uuid())
+  organizationId String
+  name           String
+  description    String?
+  category       String?
+  priceCents     Int
+  durationMin    Int
+  status         EntityStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization  Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  professionals ProfessionalService[]
+  appointments  Appointment[]
+
+  @@index([organizationId])
+}
+
+model Professional {
+  id             String       @id @default(uuid())
+  organizationId String
+  userId         String?      @unique
+  name           String
+  photoUrl       String?
+  phone          String?
+  email          String?
+  bio            String?
+  status         EntityStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User?                 @relation(fields: [userId], references: [id])
+  services       ProfessionalService[]
+  workingHours   WorkingHour[]
+  blockedPeriods BlockedPeriod[]
+  appointments   Appointment[]
+
+  @@index([organizationId])
+}
+
+// Explicit join table: which professionals perform which services.
+model ProfessionalService {
+  professionalId String
+  serviceId      String
+
+  professional Professional @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+  service      Service      @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([professionalId, serviceId])
+  @@index([serviceId])
+}
+
+model Client {
+  id             String    @id @default(uuid())
+  organizationId String
+  name           String
+  phone          String?
+  whatsapp       String?
+  email          String?
+  birthDate      DateTime?
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+
+  @@index([organizationId])
+  @@index([organizationId, name])
+}
+
+// ─── Scheduling ────────────────────────────────────────────────────────
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model Appointment {
+  id             String            @id @default(uuid())
+  organizationId String
+  clientId       String
+  professionalId String
+  serviceId      String
+  startsAt       DateTime
+  endsAt         DateTime
+  status         AppointmentStatus @default(PENDING)
+  notes          String?
+  priceCents     Int
+  cancelReason   String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client        Client         @relation(fields: [clientId], references: [id])
+  professional  Professional   @relation(fields: [professionalId], references: [id])
+  service       Service        @relation(fields: [serviceId], references: [id])
+  notifications Notification[]
+
+  // A professional cannot be double-booked. Overlap beyond exact-match
+  // start times is still enforced in the service layer (range overlap
+  // isn't expressible as a simple unique constraint).
+  @@index([organizationId, startsAt])
+  @@index([professionalId, startsAt])
+  @@index([clientId])
+}
+
+// Weekly recurring availability per professional (or org-wide when
+// professionalId is null, used as the default business hours).
+model WorkingHour {
+  id             String   @id @default(uuid())
+  organizationId String
+  professionalId String?
+  weekday        Int // 0 = Sunday .. 6 = Saturday
+  startTime      String // "08:00"
+  endTime        String // "18:00"
+  breakStart     String?
+  breakEnd       String?
+  createdAt      DateTime @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  professional Professional? @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([professionalId])
+}
+
+enum BlockReason {
+  MEETING
+  DAY_OFF
+  MAINTENANCE
+  VACATION
+  HOLIDAY
+  OTHER
+}
+
+// One-off unavailability: a single slot, a range, or a whole day.
+// Org-wide when professionalId is null (e.g. a holiday closure).
+model BlockedPeriod {
+  id             String      @id @default(uuid())
+  organizationId String
+  professionalId String?
+  startsAt       DateTime
+  endsAt         DateTime
+  reason         BlockReason @default(OTHER)
+  note           String?
+  createdAt      DateTime    @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  professional Professional? @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, startsAt])
+  @@index([professionalId, startsAt])
+}
+
+// ─── Notifications (WhatsApp-oriented, provider-agnostic) ─────────────
+
+enum NotificationChannel {
+  WHATSAPP
+}
+
+enum NotificationType {
+  CONFIRMATION
+  REMINDER
+  CANCELLATION
+  RESCHEDULE
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model Notification {
+  id             String              @id @default(uuid())
+  organizationId String
+  appointmentId  String?
+  channel        NotificationChannel @default(WHATSAPP)
+  type           NotificationType
+  status         NotificationStatus  @default(PENDING)
+  recipientPhone String
+  message        String
+  sentAt         DateTime?
+  error          String?
+  createdAt      DateTime            @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  appointment  Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([appointmentId])
+}
+
+// ─── Billing ───────────────────────────────────────────────────────────
+
+model Plan {
+  id               String   @id @default(uuid())
+  key              String   @unique // "basic" | "professional" | "business"
+  name             String
+  priceCents       Int
+  maxProfessionals Int? // null = unlimited
+  features         Json
+  createdAt        DateTime @default(now())
+
+  subscriptions Subscription[]
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  organizationId   String             @unique
+  planId           String
+  status           SubscriptionStatus @default(TRIALING)
+  trialEndsAt      DateTime?
+  currentPeriodEnd DateTime?
+  cancelledAt      DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan         Plan         @relation(fields: [planId], references: [id])
+  payments     Payment[]
+
+  @@index([organizationId])
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+// Structure ready for a future payment gateway integration.
+// No real charging happens until a gateway is wired in.
+model Payment {
+  id             String        @id @default(uuid())
+  subscriptionId String
+  amountCents    Int
+  status         PaymentStatus @default(PENDING)
+  provider       String?
+  providerRef    String?
+  paidAt         DateTime?
+  createdAt      DateTime      @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([subscriptionId])
+}
+
+// ─── Audit ─────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String?
+  userId         String?
+  action         String
+  entityType     String
+  entityId       String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([userId])
+}
